@@ -9,32 +9,41 @@ from google import genai
 # --- CONFIG ---
 TD_API_KEY = "cfe2865f704d4d6bb6f5dd759fdee0ff"
 GEMINI_API_KEY = "AIzaSyDYSY9rEV2MLwT21s5fjCpdSOtXkyEU_G0"
-REFRESH_RATE = 60 # Faster refresh to catch price moves
+REFRESH_RATE = 120 
 
-st.set_page_config(page_title="Gold Real-Time Terminal", layout="wide")
+st.set_page_config(page_title="Gold Live Sync", layout="wide")
 
-dashboard_spot = st.empty()
+# Dashboard container to prevent flickering
+dashboard = st.empty()
 
-def fetch_realtime_data():
+def get_synced_data():
     td = TDClient(apikey=TD_API_KEY)
-    
-    # 1. Fetch the Live Quote (Price right now)
+    # Fetch quote for real-time price accuracy
     quote = td.quote(symbol="XAU/USD").as_json()
-    live_price = float(quote['close'])
+    live_p = float(quote['close'])
     
-    # 2. Fetch the Time Series (The Chart)
+    # Fetch series for the chart
     ts = td.time_series(symbol="XAU/USD", interval="15min", outputsize=100)
     df = ts.with_rsi().with_ema(time_period=20).as_pandas()
     
-    # 3. CRITICAL SYNC: Replace the last row's close with the Real-Time Quote
-    # This ensures your chart doesn't "lag" behind eToro
-    df.iloc[-1, df.columns.get_loc('close')] = live_price
-    
-    return df, live_price
+    # Force sync: update last row close with real-time quote
+    df.iloc[-1, df.columns.get_loc('close')] = live_p
+    return df, live_p
 
-def get_ai_sync(price, rsi, ema):
+def get_ai_verdict(df, price):
+    latest = df.iloc[-1]
     client = genai.Client(api_key=GEMINI_API_KEY)
-    prompt = f"LIVE GOLD PRICE: ${price}. RSI: {rsi:.1f}. EMA: {ema:.2f}. Give 0-100 Score and 1-sentence bias."
+    
+    # Strict prompt to ensure verdict matches chart visual
+    prompt = f"""
+    ANALYSIS PACK:
+    - Current Gold Price: ${price:.2f}
+    - 20 EMA: ${latest['ema']:.2f}
+    - RSI: {latest['rsi']:.1f}
+    
+    TASK: Give a Confidence Score (0-100) and a 2-sentence verdict.
+    STRICT RULE: If Price is BELOW EMA, you MUST be Bearish. If ABOVE, Bullish.
+    """
     response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
     
     try:
@@ -43,35 +52,39 @@ def get_ai_sync(price, rsi, ema):
         score = 50
     return score, response.text
 
-# --- THE PERMANENT LOOP ---
+# --- PERMANENT LOOP ---
 while True:
-    with dashboard_spot.container():
+    with dashboard.container():
         try:
-            df, live_price = fetch_realtime_data()
+            df, live_p = get_synced_data()
             latest = df.iloc[-1]
+            score, ai_msg = get_ai_verdict(df, live_p)
+
+            # 🚨 LIVE HEADER
+            st.markdown(f"## 🥇 GOLD LIVE: ${live_p:,.2f} | Score: {score}%")
             
-            score, ai_verdict = get_ai_sync(live_price, latest['rsi'], latest['ema'])
-
-            # 🚨 LIVE PRICE HEADER (Huge and Bold)
-            c1, c2, c3 = st.columns([2, 1, 1])
-            with c1:
-                st.markdown(f"# 🥇 XAU/USD: ${live_price:,.2f}")
-            with c2:
-                st.metric("EMA Divergence", f"{live_price - latest['ema']:.2f}")
-            with c3:
-                st.metric("Confidence", f"{score}%")
-
-            # 📈 CHART
+            # 📈 CHART (Top)
             fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close']))
-            fig.add_trace(go.Scatter(x=df.index, y=df['ema'], line=dict(color='cyan')))
-            fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=0, b=0))
+            fig.add_trace(go.Candlestick(x=df.index, open=df['open'], high=df['high'], low=df['low'], close=df['close'], name="Gold"))
+            fig.add_trace(go.Scatter(x=df.index, y=df['ema'], line=dict(color='cyan', width=2), name="20 EMA"))
+            fig.update_layout(height=450, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(t=0, b=0))
             st.plotly_chart(fig, use_container_width=True)
 
-            st.info(f"**AI VERDICT:** {ai_verdict}")
-            st.caption(f"Last Server Sync: {pd.Timestamp.now().strftime('%H:%M:%S')} (Real-time Endpoint)")
+            # 📊 METRICS (Bottom)
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                # RSI Small Chart
+                fig_rsi = go.Figure(go.Scatter(x=df.index, y=df['rsi'], line=dict(color='purple')))
+                fig_rsi.add_hline(y=70, line_color="red"); fig_rsi.add_hline(y=30, line_color="green")
+                fig_rsi.update_layout(height=200, template="plotly_dark", title="RSI Momentum", margin=dict(t=30, b=0))
+                st.plotly_chart(fig_rsi, use_container_width=True)
+            with c2:
+                st.info(f"**AI STRATEGIST VERDICT:**\n\n{ai_msg}")
+            
+            st.caption(f"Last Sync: {pd.Timestamp.now().strftime('%H:%M:%S')} | Environment: Permanent Cloud")
 
         except Exception as e:
-            st.error(f"Sync Error: {e}")
+            st.error(f"Connection Sync Issue: {e}")
+            time.sleep(10)
 
     time.sleep(REFRESH_RATE)
